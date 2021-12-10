@@ -4,7 +4,7 @@
  *	  definition of the "statistics" system catalog (pg_statistic)
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/catalog/pg_statistic.h
@@ -29,8 +29,7 @@
 CATALOG(pg_statistic,2619,StatisticRelationId)
 {
 	/* These fields form the unique key for the entry: */
-	Oid			starelid BKI_LOOKUP(pg_class);	/* relation containing
-												 * attribute */
+	Oid			starelid;		/* relation containing attribute */
 	int16		staattnum;		/* attribute (column) stats are for */
 	bool		stainherit;		/* true if inheritance children are included */
 
@@ -91,17 +90,17 @@ CATALOG(pg_statistic,2619,StatisticRelationId)
 	int16		stakind4;
 	int16		stakind5;
 
-	Oid			staop1 BKI_LOOKUP_OPT(pg_operator);
-	Oid			staop2 BKI_LOOKUP_OPT(pg_operator);
-	Oid			staop3 BKI_LOOKUP_OPT(pg_operator);
-	Oid			staop4 BKI_LOOKUP_OPT(pg_operator);
-	Oid			staop5 BKI_LOOKUP_OPT(pg_operator);
+	Oid			staop1;
+	Oid			staop2;
+	Oid			staop3;
+	Oid			staop4;
+	Oid			staop5;
 
-	Oid			stacoll1 BKI_LOOKUP_OPT(pg_collation);
-	Oid			stacoll2 BKI_LOOKUP_OPT(pg_collation);
-	Oid			stacoll3 BKI_LOOKUP_OPT(pg_collation);
-	Oid			stacoll4 BKI_LOOKUP_OPT(pg_collation);
-	Oid			stacoll5 BKI_LOOKUP_OPT(pg_collation);
+	Oid			stacoll1;
+	Oid			stacoll2;
+	Oid			stacoll3;
+	Oid			stacoll4;
+	Oid			stacoll5;
 
 #ifdef CATALOG_VARLEN			/* variable-length fields start here */
 	float4		stanumbers1[1];
@@ -133,12 +132,6 @@ CATALOG(pg_statistic,2619,StatisticRelationId)
  * ----------------
  */
 typedef FormData_pg_statistic *Form_pg_statistic;
-
-DECLARE_TOAST(pg_statistic, 2840, 2841);
-
-DECLARE_UNIQUE_INDEX_PKEY(pg_statistic_relid_att_inh_index, 2696, StatisticRelidAttnumInhIndexId, on pg_statistic using btree(starelid oid_ops, staattnum int2_ops, stainherit bool_ops));
-
-DECLARE_FOREIGN_KEY((starelid, staattnum), pg_attribute, (attrelid, attnum));
 
 #ifdef EXPOSE_TO_CLIENT_CODE
 
@@ -276,6 +269,21 @@ DECLARE_FOREIGN_KEY((starelid, staattnum), pg_attribute, (attrelid, attnum));
  * bounds.  Only non-NULL, non-empty ranges are included.
  */
 #define STATISTIC_KIND_BOUNDS_HISTOGRAM  7
+
+ /*
+  * A "equiwidth histogram" statistic kind
+  */
+#define STATISTIC_KIND_EQUIWIDTH_HISTOGRAM 8
+
+ /*
+  * Range subdivision of the equiwidth histogram
+  */
+#define STATISTIC_KIND_EQUIWIDTH_DATA 9
+
+ /*
+  * Dummy statistics value to test if things are working properly (DEBUG)
+  */
+#define STATISTIC_KIND_DUMMY  10
 
 #endif							/* EXPOSE_TO_CLIENT_CODE */
 

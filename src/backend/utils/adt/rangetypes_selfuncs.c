@@ -6,7 +6,7 @@
  * Estimates are based on histograms of lower and upper bounds, and the
  * fraction of empty ranges.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2020, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -101,6 +101,8 @@ default_range_selectivity(Oid operator)
 			return 0.01;
 	}
 }
+
+
 
 /*
  * rangesel -- restriction selectivity for range operators
@@ -228,8 +230,8 @@ rangesel(PG_FUNCTION_ARGS)
 }
 
 static double
-calc_rangesel(TypeCacheEntry *typcache, VariableStatData *vardata,
-			  const RangeType *constval, Oid operator)
+calc_rangesel(TypeCacheEntry *typcache, VariableStatData *vardata, // 'vardata' usually represent the column data in the predicate "column << [x,y]"
+			  const RangeType *constval, Oid operator)				// 'constval' usually represent the constant [x,y] in the predicate "column << [x,y]"
 {
 	double		hist_selec;
 	double		selec;
@@ -375,7 +377,12 @@ calc_hist_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 {
 	AttStatsSlot hslot;
 	AttStatsSlot lslot;
+	AttStatsSlot dummyslot;
+	AttStatsSlot equiwidthslot;
+	AttStatsSlot equiwidthdataslot;
 	int			nhist;
+	int   		ndummy;
+	int 		nbucket;
 	RangeBound *hist_lower;
 	RangeBound *hist_upper;
 	int			i;
@@ -384,7 +391,7 @@ calc_hist_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 	bool		empty;
 	double		hist_selec;
 
-	/* Can't use the histogram with insecure range support functions */
+	/* Can't use the histogram with insecure range support functions */ // We first look if we should care to import the 'bound histogram'
 	if (!statistic_proc_security_check(vardata,
 									   typcache->rng_cmp_proc_finfo.fn_oid))
 		return -1;
@@ -393,12 +400,88 @@ calc_hist_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 									   typcache->rng_subdiff_finfo.fn_oid))
 		return -1;
 
-	/* Try to get histogram of ranges */
-	if (!(HeapTupleIsValid(vardata->statsTuple) &&
-		  get_attstatsslot(&hslot, vardata->statsTuple,
-						   STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid,
-						   ATTSTATSSLOT_VALUES)))
+
+
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// DUMMY PART - Will be called for optimization of SQL requests such as EXPLAIN ANALYZE SELECT count(*) FROM temp AS t1  WHERE t1.r >> '[20,50]';
+// Note that if this histogram is used only once (i.e only for one 'scenario' of predicate), one should think of defining it only once in a corresponding selectivity function 
+
+	if (!(HeapTupleIsValid(vardata->statsTuple) &&                     
+		  get_attstatsslot(&equiwidthslot, vardata->statsTuple,
+						   STATISTIC_KIND_EQUIWIDTH_HISTOGRAM, InvalidOid, 
+						   ATTSTATSSLOT_VALUES)))						 
+		return -1.0;	
+	if (!(HeapTupleIsValid(vardata->statsTuple) &&                     
+		  get_attstatsslot(&equiwidthdataslot, vardata->statsTuple,
+						   STATISTIC_KIND_EQUIWIDTH_DATA, InvalidOid, 
+						   ATTSTATSSLOT_VALUES)))						 
+		return -1.0;	
+
+
+	if (equiwidthslot.nvalues < 2) // An histogram with less than 2 values is not an histogram.
+	{
+		free_attstatsslot(&equiwidthslot);
+		free_attstatsslot(&equiwidthdataslot);
 		return -1.0;
+	}
+
+	nbucket = equiwidthslot.nvalues;
+
+
+	for (i = 0; i < nbucket; i++)
+	{
+		printf("rangetypes_selfuncs.c : equiwidth dump %f\n", DatumGetFloat8(equiwidthslot.values[i]));
+		printf("rangetypes_selfuncs.c : data dump %f\n", equiwidthdataslot.values[i]);
+		fflush(stdout);
+	}
+
+																																	///////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// DUMMY PART - Will be called for optimization of SQL requests such as EXPLAIN ANALYZE SELECT count(*) FROM temp AS t1  WHERE t1.r >> '[20,50]';
+// Note that if this histogram is used only once (i.e only for one 'scenario' of predicate), one should think of defining it only once in a corresponding selectivity function 
+
+	if (!(HeapTupleIsValid(vardata->statsTuple) &&                     
+		  get_attstatsslot(&dummyslot, vardata->statsTuple,
+						   STATISTIC_KIND_DUMMY, InvalidOid, 
+						   ATTSTATSSLOT_VALUES)))						 
+		return -1.0;	
+
+
+	if (dummyslot.nvalues < 2) // An histogram with less than 2 values is not an histogram.
+	{
+		free_attstatsslot(&dummyslot);
+		return -1.0;
+	}
+
+	ndummy = dummyslot.nvalues;
+
+
+	for (i = 0; i < ndummy; i++)
+	{
+		//printf("rangetypes_selfuncs.c : Retrieved value from dummyslot %f\n", DatumGetFloat8(dummyslot.values[i]));
+		//fflush(stdout);
+	}
+
+																																	///////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+	/* Try to get histogram of ranges */
+	if (!(HeapTupleIsValid(vardata->statsTuple) &&                     // We import the 'bound histogram' and place-it in hslot
+		  get_attstatsslot(&hslot, vardata->statsTuple,
+						   STATISTIC_KIND_BOUNDS_HISTOGRAM, InvalidOid, // Note that the STATISTIC_KIND_* should help to define wich statistic we should store
+						   ATTSTATSSLOT_VALUES)))						// in the slot (i.e there is a priori nothing else that can distinguish the retrieved 
+		return -1.0;													// statistics between two usages of the 'get_attstatsslot()').
 
 	/* check that it's a histogram, not just a dummy entry */
 	if (hslot.nvalues < 2)
@@ -411,23 +494,24 @@ calc_hist_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 	 * Convert histogram of ranges into histograms of its lower and upper
 	 * bounds.
 	 */
-	nhist = hslot.nvalues;
-	hist_lower = (RangeBound *) palloc(sizeof(RangeBound) * nhist);
+	nhist = hslot.nvalues;													// This part of the code exists only because the elements inside the bound
+	hist_lower = (RangeBound *) palloc(sizeof(RangeBound) * nhist);			// histogram were serialized in rangetypes_typanalyze.c 
 	hist_upper = (RangeBound *) palloc(sizeof(RangeBound) * nhist);
 	for (i = 0; i < nhist; i++)
 	{
-		range_deserialize(typcache, DatumGetRangeTypeP(hslot.values[i]),
+		range_deserialize(typcache, DatumGetRangeTypeP(hslot.values[i]), 
 						  &hist_lower[i], &hist_upper[i], &empty);
 		/* The histogram should not contain any empty ranges */
+		
 		if (empty)
 			elog(ERROR, "bounds histogram contains an empty range");
 	}
 
-	/* @> and @< also need a histogram of range lengths */
-	if (operator == OID_RANGE_CONTAINS_OP ||
-		operator == OID_RANGE_CONTAINED_OP)
+	/* @> and @< also need a histogram of range lengths */ 					// The code below shows that the length histogram is actually used in the 
+	if (operator == OID_RANGE_CONTAINS_OP ||								// selectivity computation only for specific operators @> and @<
+		operator == OID_RANGE_CONTAINED_OP)									
 	{
-		if (!(HeapTupleIsValid(vardata->statsTuple) &&
+		if (!(HeapTupleIsValid(vardata->statsTuple) &&						// Retriving process of the length histogram (same as above for the bound histogram).
 			  get_attstatsslot(&lslot, vardata->statsTuple,
 							   STATISTIC_KIND_RANGE_LENGTH_HISTOGRAM,
 							   InvalidOid,
@@ -491,14 +575,14 @@ calc_hist_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 												 hist_lower, nhist, true);
 			break;
 
-		case OID_RANGE_LEFT_OP:
+		case OID_RANGE_LEFT_OP:															// var << const predicate we should care about (and maybe redefine corresponding sel function)
 			/* var << const when upper(var) < lower(const) */
 			hist_selec =
 				calc_hist_selectivity_scalar(typcache, &const_lower,
 											 hist_upper, nhist, false);
 			break;
 
-		case OID_RANGE_RIGHT_OP:
+		case OID_RANGE_RIGHT_OP:														// var >> const we should care about (and maybe redefine corresponding sel function)
 			/* var >> const when lower(var) > upper(const) */
 			hist_selec =
 				1 - calc_hist_selectivity_scalar(typcache, &const_upper,
@@ -519,7 +603,7 @@ calc_hist_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 											 hist_upper, nhist, true);
 			break;
 
-		case OID_RANGE_OVERLAP_OP:
+		case OID_RANGE_OVERLAP_OP:														// A && [const_lower, const_upper] we should care about (and maybe redefine corresponding sel function)
 		case OID_RANGE_CONTAINS_ELEM_OP:
 
 			/*
