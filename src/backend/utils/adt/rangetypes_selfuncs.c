@@ -33,6 +33,8 @@
 static double calc_rangesel(TypeCacheEntry *typcache, VariableStatData *vardata,
 							const RangeType *constval, Oid operator);
 static double default_range_selectivity(Oid operator);
+static double calc_hist_selectivity_from_width_histogram_strctly_less_than(TypeCacheEntry *typcache, const RangeBound *constbound, AttStatsSlot equiwidthslot, AttStatsSlot equiwidthdataslot, bool equal);
+static double calc_hist_selectivity_from_width_histogram_strctly_greater_than(TypeCacheEntry *typcache, const RangeBound *constbound, AttStatsSlot equiwidthslot, AttStatsSlot equiwidthdataslot, bool equal);
 static double calc_hist_selectivity(TypeCacheEntry *typcache,
 									VariableStatData *vardata, const RangeType *constval,
 									Oid operator);
@@ -101,6 +103,109 @@ default_range_selectivity(Oid operator)
 			return 0.01;
 	}
 }
+
+
+
+
+Datum
+rangeoverlapsjoinsel(PG_FUNCTION_ARGS)
+{
+	printf("GOING INTO rangeoverlapsjoinsel\n");
+	fflush(stdout);
+    PlannerInfo *root = (PlannerInfo *) PG_GETARG_POINTER(0);
+    Oid         operator = PG_GETARG_OID(1);
+    List       *args = (List *) PG_GETARG_POINTER(2);
+    JoinType    jointype = (JoinType) PG_GETARG_INT16(3);
+    SpecialJoinInfo *sjinfo = (SpecialJoinInfo *) PG_GETARG_POINTER(4);
+    Oid         collation = PG_GET_COLLATION();
+
+    double      selec = 0.005;
+
+    VariableStatData vardata1;
+    VariableStatData vardata2;
+    Oid         opfuncoid;
+    AttStatsSlot sslot1;
+    int         nhist;
+    RangeBound *hist_lower1;
+    RangeBound *hist_upper1;
+    int         i;
+    Form_pg_statistic stats1 = NULL;
+    TypeCacheEntry *typcache = NULL;
+    bool        join_is_reversed;
+    bool        empty;
+
+
+    get_join_variables(root, args, sjinfo,
+                       &vardata1, &vardata2, &join_is_reversed); // ######################### Assuming vardata1 & vardata2 used to contain operand values 
+
+    typcache = range_get_typcache(fcinfo, vardata1.vartype);
+    opfuncoid = get_opcode(operator);
+
+    memset(&sslot1, 0, sizeof(sslot1));
+
+    /* Can't use the histogram with insecure range support functions */
+    if (!statistic_proc_security_check(&vardata1, opfuncoid))
+        PG_RETURN_FLOAT8((float8) selec);
+
+    if (HeapTupleIsValid(vardata1.statsTuple))
+    {
+        stats1 = (Form_pg_statistic) GETSTRUCT(vardata1.statsTuple); // ######################## Where do "stats1" is used ? Why is he useful ?
+        /* Try to get fraction of empty ranges */
+        if (!get_attstatsslot(&sslot1, vardata1.statsTuple,
+                             STATISTIC_KIND_BOUNDS_HISTOGRAM, //####################### Assuming data to be stored in a "serialized way" and "STATISTIC_KIND_.."
+                             InvalidOid, ATTSTATSSLOT_VALUES)) //###################### to be used to 'identifies' the serialized data (?) 
+        {
+            ReleaseVariableStats(vardata1);
+            ReleaseVariableStats(vardata2);
+            PG_RETURN_FLOAT8((float8) selec);
+        }
+    }
+
+    nhist = sslot1.nvalues;
+    hist_lower1 = (RangeBound *) palloc(sizeof(RangeBound) * nhist);
+    hist_upper1 = (RangeBound *) palloc(sizeof(RangeBound) * nhist);
+    for (i = 0; i < nhist; i++)
+    {
+        range_deserialize(typcache, DatumGetRangeTypeP(sslot1.values[i]),
+                          &hist_lower1[i], &hist_upper1[i], &empty);
+        /* The histogram should not contain any empty ranges */
+        if (empty)
+            elog(ERROR, "bounds histogram contains an empty range");
+    }
+
+    printf("hist_lower = [");
+    for (i = 0; i < nhist; i++)
+    {
+        printf("%d", DatumGetInt16(hist_lower1[i].val));
+        if (i < nhist - 1)
+            printf(", ");
+    }
+    printf("]\n");
+    printf("hist_upper = [");
+    for (i = 0; i < nhist; i++)
+    {
+        printf("%d", DatumGetInt16(hist_upper1[i].val));
+        if (i < nhist - 1)
+            printf(", ");
+    }
+    printf("]\n");
+
+    fflush(stdout);
+
+    pfree(hist_lower1);
+    pfree(hist_upper1);
+
+    free_attstatsslot(&sslot1);
+
+    ReleaseVariableStats(vardata1);
+    ReleaseVariableStats(vardata2);
+
+    CLAMP_PROBABILITY(selec);
+    PG_RETURN_FLOAT8((float8) selec);
+}
+
+
+
 
 
 
@@ -236,7 +341,7 @@ calc_rangesel(TypeCacheEntry *typcache, VariableStatData *vardata, // 'vardata' 
 	double		hist_selec;
 	double		selec;
 	float4		empty_frac,
-				null_frac;
+				null_frac; 
 
 	/*
 	 * First look up the fraction of NULLs and empty ranges from pg_statistic.
@@ -265,6 +370,8 @@ calc_rangesel(TypeCacheEntry *typcache, VariableStatData *vardata, // 'vardata' 
 			/* No empty fraction statistic. Assume no empty ranges. */
 			empty_frac = 0.0;
 		}
+
+		
 	}
 	else
 	{
@@ -428,15 +535,7 @@ calc_hist_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 		return -1.0;
 	}
 
-	nbucket = equiwidthslot.nvalues;
-
-
-	for (i = 0; i < nbucket; i++)
-	{
-		printf("rangetypes_selfuncs.c : equiwidth dump %f\n", DatumGetFloat8(equiwidthslot.values[i]));
-		printf("rangetypes_selfuncs.c : data dump %f\n", equiwidthdataslot.values[i]);
-		fflush(stdout);
-	}
+	
 
 																																	///////////
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -577,16 +676,17 @@ calc_hist_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 
 		case OID_RANGE_LEFT_OP:															// var << const predicate we should care about (and maybe redefine corresponding sel function)
 			/* var << const when upper(var) < lower(const) */
-			hist_selec =
-				calc_hist_selectivity_scalar(typcache, &const_lower,
-											 hist_upper, nhist, false);
+			//hist_selec =
+				//calc_hist_selectivity_scalar(typcache, &const_lower,
+											// hist_upper, nhist, false);
+
+
+			hist_selec = calc_hist_selectivity_from_width_histogram_strctly_less_than(typcache, &const_lower, equiwidthslot, equiwidthdataslot, false);
 			break;
 
 		case OID_RANGE_RIGHT_OP:														// var >> const we should care about (and maybe redefine corresponding sel function)
 			/* var >> const when lower(var) > upper(const) */
-			hist_selec =
-				1 - calc_hist_selectivity_scalar(typcache, &const_upper,
-												 hist_lower, nhist, true);
+			hist_selec = calc_hist_selectivity_from_width_histogram_strctly_greater_than(typcache, &const_upper, equiwidthslot, equiwidthdataslot, false);
 			break;
 
 		case OID_RANGE_OVERLAPS_RIGHT_OP:
@@ -617,13 +717,11 @@ calc_hist_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 			 * caller already constructed the singular range from the element
 			 * constant, so just treat it the same as &&.
 			 */
-			hist_selec =
-				calc_hist_selectivity_scalar(typcache, &const_lower, hist_upper,
-											 nhist, false);
-			hist_selec +=
-				(1.0 - calc_hist_selectivity_scalar(typcache, &const_upper, hist_lower,
-													nhist, true));
+			hist_selec =calc_hist_selectivity_from_width_histogram_strctly_less_than(typcache, &const_lower, equiwidthslot, equiwidthdataslot, false);
+			hist_selec += calc_hist_selectivity_from_width_histogram_strctly_greater_than(typcache, &const_upper, equiwidthslot, equiwidthdataslot, false);
 			hist_selec = 1.0 - hist_selec;
+			printf("TOTAL Selectivity : %f\n", hist_selec);
+			fflush(stdout);
 			break;
 
 		case OID_RANGE_CONTAINS_OP:
@@ -669,6 +767,117 @@ calc_hist_selectivity(TypeCacheEntry *typcache, VariableStatData *vardata,
 	free_attstatsslot(&hslot);
 
 	return hist_selec;
+}
+
+static double calc_hist_selectivity_from_width_histogram_strctly_greater_than(TypeCacheEntry *typcache, const RangeBound *constbound, AttStatsSlot equiwidthslot, AttStatsSlot equiwidthdataslot, bool equal)
+{
+	bool empty;
+	printf("HELLO#############################");
+	fflush(stdout);
+	int nbucket = equiwidthdataslot.nvalues;	
+	int bin_index;
+	int sum_bins=0;
+	float selec;
+	float coverage = (float)equiwidthslot.values[nbucket];
+	 										// This part of the code exists only because the elements inside the bound
+	RangeBound *bin_lowers = (RangeBound *) palloc(sizeof(RangeBound) * nbucket);			// histogram were serialized in rangetypes_typanalyze.c 
+	RangeBound *bin_uppers = (RangeBound *) palloc(sizeof(RangeBound) * nbucket);
+	for (int i = 0; i < nbucket; i++)
+	{
+		range_deserialize(typcache, DatumGetRangeTypeP(equiwidthdataslot.values[i]), 
+						  &bin_lowers[i], &bin_uppers[i], &empty);
+		/* The histogram should not contain any empty ranges */
+		
+		if (empty)
+			elog(ERROR, "equiwidth data histogram contains an empty range");
+	}
+
+
+	for (int i = 0; i < nbucket; i++)
+	{
+		printf("rangetypes_selfuncs.c : equiwidth dump %f\n", DatumGetFloat8(equiwidthslot.values[i]));
+		printf("rangetypes_selfuncs.c : data dump %d\n", DatumGetInt16(bin_lowers[i].val));
+		printf("rangetypes_selfuncs.c : data dump %d\n", bin_uppers[i].val);
+		fflush(stdout);
+	}
+
+	bin_index = rbound_bsearch(typcache, constbound, bin_lowers, nbucket, equal);
+	for(int j=bin_index+1; j<nbucket; j++){ 
+		if(j!=10){ // j!=10 is a sticking plaster (unknown 'NaN' at index 10 will pollute the equiwidth histogram)
+			sum_bins += DatumGetFloat8(equiwidthslot.values[j]);
+			printf("\nsum_bins %i\n", sum_bins);
+		}
+		
+	}
+	printf("COVERAGE : %f\n", coverage);
+	selec = sum_bins/coverage;
+	printf("---------%f\n", selec);
+	fflush(stdout);
+	
+
+	printf("INDEX VALUE -----------> %i\n", bin_index);
+
+	printf("rangetypes_selfuncs.c : equiwidth dump %f\n", DatumGetFloat8(equiwidthslot.values[bin_index]));
+	printf("rangetypes_selfuncs.c : data dump %d\n", DatumGetInt16(bin_lowers[bin_index].val));
+	printf("rangetypes_selfuncs.c : data dump %d\n", bin_uppers[bin_index].val);
+	fflush(stdout);
+	return selec;
+}
+
+
+static double calc_hist_selectivity_from_width_histogram_strctly_less_than(TypeCacheEntry *typcache, const RangeBound *constbound, AttStatsSlot equiwidthslot, AttStatsSlot equiwidthdataslot, bool equal)
+{
+	bool empty;
+	printf("HELLO#############################");
+	fflush(stdout);
+	int nbucket = equiwidthdataslot.nvalues;	
+	int bin_index;
+	int sum_bins=0;
+	float selec;
+	float coverage = (float)equiwidthslot.values[nbucket];
+	 										// This part of the code exists only because the elements inside the bound
+	RangeBound *bin_lowers = (RangeBound *) palloc(sizeof(RangeBound) * nbucket);			// histogram were serialized in rangetypes_typanalyze.c 
+	RangeBound *bin_uppers = (RangeBound *) palloc(sizeof(RangeBound) * nbucket);
+	for (int i = 0; i < nbucket; i++)
+	{
+		range_deserialize(typcache, DatumGetRangeTypeP(equiwidthdataslot.values[i]), 
+						  &bin_lowers[i], &bin_uppers[i], &empty);
+		/* The histogram should not contain any empty ranges */
+		
+		if (empty)
+			elog(ERROR, "equiwidth data histogram contains an empty range");
+	}
+
+
+	for (int i = 0; i < nbucket; i++)
+	{
+		printf("rangetypes_selfuncs.c : equiwidth dump %f\n", DatumGetFloat8(equiwidthslot.values[i]));
+		printf("rangetypes_selfuncs.c : data dump %d\n", DatumGetInt16(bin_lowers[i].val));
+		printf("rangetypes_selfuncs.c : data dump %d\n", bin_uppers[i].val);
+		fflush(stdout);
+	}
+
+	bin_index = rbound_bsearch(typcache, constbound, bin_lowers, nbucket, equal);
+	for(int j=0; j<bin_index; j++){ 
+		if(j!=10){ // j!=10 is a sticking plaster (unknown 'NaN' at index 10 will pollute the equiwidth histogram)
+			sum_bins += DatumGetFloat8(equiwidthslot.values[j]);
+			printf("\nsum_bins %i\n", sum_bins);
+		}
+		
+	}
+	printf("COVERAGE : %f\n", coverage);
+	selec = sum_bins/coverage;
+	printf("---------%f\n", selec);
+	fflush(stdout);
+	
+
+	printf("INDEX VALUE -----------> %i\n", bin_index);
+
+	printf("rangetypes_selfuncs.c : equiwidth dump %f\n", DatumGetFloat8(equiwidthslot.values[bin_index]));
+	printf("rangetypes_selfuncs.c : data dump %d\n", DatumGetInt16(bin_lowers[bin_index].val));
+	printf("rangetypes_selfuncs.c : data dump %d\n", bin_uppers[bin_index].val);
+	fflush(stdout);
+	return selec;
 }
 
 

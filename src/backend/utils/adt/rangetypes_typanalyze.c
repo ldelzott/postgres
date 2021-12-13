@@ -115,11 +115,15 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc, // samp
 			   *dummys; /// HERE90
 	RangeBound *lowers,
 			   *uppers;
+	RangeBound *lower_bins,
+			   *upper_bins;
 	double		total_width = 0;
 
 	/* Allocate memory to hold range bounds and lengths of the sample ranges. */
 	lowers = (RangeBound *) palloc(sizeof(RangeBound) * samplerows);
 	uppers = (RangeBound *) palloc(sizeof(RangeBound) * samplerows);
+	lower_bins = (RangeBound *) palloc(sizeof(RangeBound) *num_bucket );
+	upper_bins = (RangeBound *) palloc(sizeof(RangeBound) *num_bucket );
 	lengths = (float8 *) palloc(sizeof(float8) * samplerows);
 	dummys = (float8 *) palloc(sizeof(float8) * samplerows); /// HERE90
 
@@ -162,15 +166,19 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc, // samp
 				if (DatumGetFloat8(FunctionCall2Coll(&typcache->rng_subdiff_finfo,typcache->rng_collation, lower.val, global_min_bound))<0){
 					//printf("lower.val-global_min_bound, %f\n",DatumGetFloat8(FunctionCall2Coll(&typcache->rng_subdiff_finfo,typcache->rng_collation, lower.val, global_min_bound)));
 					global_min_bound=lower.val;
+					//printf("global_bound %d\n",global_min_bound);
 					//fflush(stdout);
 				}
 
 				if (DatumGetFloat8(FunctionCall2Coll(&typcache->rng_subdiff_finfo,typcache->rng_collation, upper.val, global_max_bound))>0){
 					//printf("upper.val-global_max_bound, %f\n",DatumGetFloat8(FunctionCall2Coll(&typcache->rng_subdiff_finfo,typcache->rng_collation, upper.val, global_max_bound)));
 					global_max_bound=upper.val;
+					//printf("global_bound %d\n",global_max_bound);
 					//fflush(stdout);
 				}
 			} 
+
+
 
 			
 							 
@@ -212,7 +220,11 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc, // samp
 			empty_cnt++;
 
 		non_null_cnt++;
-	}										
+	}	
+
+	//printf("GLOBAL MIN BOUND %d\n", global_min_bound);
+	//printf("GLOBAL MAX BOUND %d\n", global_max_bound);
+
 	// ################ END OF THE FOR LOOP : This is were the "fetching" process end : lowers, uppers and lengths arrays are now filled ##################
 	slot_idx = 0; // Arbitrarily-chosen slot number. There are only 5 of those slots per VacAttrStats variable (see the 'stat' parameter of the function we are in)
 
@@ -229,6 +241,7 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc, // samp
 					delta,
 					deltafrac,
 					i;
+		int coverage_cntr=0;
 		MemoryContext old_cxt;
 		float4	   *emptyfrac;
 
@@ -263,28 +276,76 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc, // samp
 		if (non_empty_cnt >= 2 && has_subdiff) 
 		{
 
-			equiwidth_hist_values = (Datum *) palloc(num_bucket*sizeof(Datum));
+
+			equiwidth_hist_values = (Datum *) palloc((num_bucket+1)*sizeof(Datum)); // One value is added to store mean coverage
 			equiwidth_data_values = (Datum *) palloc(num_bucket*sizeof(Datum)); // Communicating global_min_bound and global_max_bound to sel. function using histogram
 			bool continuity;
-			Datum delta = (global_max_bound-global_min_bound)/num_bucket;
+			float delta = ((float)global_max_bound-(float)global_min_bound)/(float)num_bucket;
+			printf("%f\n", delta);
+			fflush(stdout);
 
 			for (i = 0; i < non_empty_cnt; i++)
 			{	
 				continuity=false;
 				for (int j=0; j<num_bucket; j++){
-					equiwidth_data_values[j]=global_min_bound+j*delta;
+					
 					if (continuity){
+						coverage_cntr++;
 						equiwidth_hist_values[j]=Float8GetDatum(DatumGetFloat8(equiwidth_hist_values[j])+1);
 						if(DatumGetFloat8(FunctionCall2Coll(&typcache->rng_subdiff_finfo,typcache->rng_collation, global_min_bound+(j+1)*delta, uppers[i].val))>0){
 							continuity=false;
 							j=num_bucket;
 						}
 					} else if (DatumGetFloat8(FunctionCall2Coll(&typcache->rng_subdiff_finfo,typcache->rng_collation, global_min_bound+(j+1)*delta, lowers[i].val))>0) {
+						coverage_cntr++;
 						continuity=true;
 						equiwidth_hist_values[j]=Float8GetDatum(DatumGetFloat8(equiwidth_hist_values[j])+1);
 					} 
 				}
 			}
+			equiwidth_hist_values[num_bucket] = (float)coverage_cntr; // will be equal to bt_mean if divided by non_empty_count
+			//printf("%i\n",non_empty_cnt);
+			//fflush(stdout);
+			//printf("%i\n",coverage_cntr);
+			//fflush(stdout);
+
+			for (int j=0; j<num_bucket; j++){
+				RangeBound 	upper_bin,
+							lower_bin;
+
+				//equiwidth_data_values[j]=global_min_bound+j*delta;
+					
+				lower_bin.val = global_min_bound+j*delta;
+				lower_bin.infinite = false;
+				lower_bin.inclusive = true;
+				lower_bin.lower = true;
+
+				upper_bin.val = global_min_bound+(j+1)*delta;
+				upper_bin.infinite = false;
+				upper_bin.inclusive = false;
+				upper_bin.lower = false; 
+
+				lower_bins[j] = lower_bin;
+				upper_bins[j] = upper_bin;
+
+				//printf("%d\n",DatumGetFloat8(lower_bins[j].val));
+				//printf("%d\n",DatumGetChar(lower_bins[j].val));
+				//printf("%d\n",lower_bins[j].val);
+				//printf("%d\n",upper_bins[j].val);
+				//fflush(stdout);
+
+				equiwidth_data_values[j] = PointerGetDatum(range_serialize(typcache,
+																	   &lower_bins[j],
+																	   &upper_bins[j],
+																	   false));
+
+
+			}
+
+
+
+
+
 		}
 		else
 		{
@@ -296,7 +357,7 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc, // samp
 		stats->staop[slot_idx] = Float8LessOperator; 
 		stats->stacoll[slot_idx] = InvalidOid;
 		stats->stavalues[slot_idx] = equiwidth_hist_values; 
-		stats->numvalues[slot_idx] = num_bucket;
+		stats->numvalues[slot_idx] = num_bucket+1;
 		stats->statypid[slot_idx] = FLOAT8OID; 			
 		stats->statyplen[slot_idx] = sizeof(float8);	
 		stats->statypbyval[slot_idx] = FLOAT8PASSBYVAL;	
@@ -313,20 +374,11 @@ compute_range_stats(VacAttrStats *stats, AnalyzeAttrFetchFunc fetchfunc, // samp
 
 
 
-
-
-
-		stats->staop[slot_idx] = Float8LessOperator; //Note that slot_idx is now equal to 1 (see increment at line 265)
-		stats->stacoll[slot_idx] = InvalidOid;
 		stats->stakind[slot_idx] = STATISTIC_KIND_EQUIWIDTH_DATA; // ######################################
 		stats->stavalues[slot_idx] = equiwidth_data_values; // The value of slot_idx
-		stats->numvalues[slot_idx] = num_bucket; 			// indicate the slot that will be used to store the array. When looking at the definition of the type of "stats" (who is 'VacAttrStats*'),
-		stats->statypid[slot_idx] = FLOAT8OID; 			// By default, postgres will assume that the value stored in those slots are arrays composed of the 
-		stats->statyplen[slot_idx] = sizeof(float8);	//same type as the type of the column under analysis. Here, since we try to store float, we need 
-		stats->statypbyval[slot_idx] = FLOAT8PASSBYVAL;	//to explicitely specify it
-		stats->statypalign[slot_idx] = 'd'; 
-		stats->stanumbers[slot_idx] = emptyfrac;
-		stats->numnumbers[slot_idx] = 1;
+		stats->numvalues[slot_idx] = num_bucket; 
+
+
 		slot_idx++;
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////::
